@@ -1,0 +1,527 @@
+diff --git a/kern/asst1/stoplight.c b/kern/asst1/stoplight.c
+index e859408..ff56d0e 100644
+--- a/kern/asst1/stoplight.c
++++ b/kern/asst1/stoplight.c
+@@ -5,6 +5,7 @@
+  *
+  * NB: You can use any synchronization primitives available to solve
+  * the stoplight problem in this file.
++ * version 1 
+  */
+ 
+ 
+@@ -18,6 +19,8 @@
+ #include <lib.h>
+ #include <test.h>
+ #include <thread.h>
++#include <synch.h>
++#include <machine/spl.h>
+ 
+ 
+ /*
+@@ -26,10 +29,41 @@
+  *
+  */
+ 
++enum vehicletypes{CAR, TRUCK};
++enum vehicledirections{A, B, C};
++enum turndirection{LEFT, RIGHT};
++
++static const char *vtypes[] = {"CAR", "TRUCK"};
++static const char *vdirections[] = {"A", "B", "C"};
++
++struct lock *ab;
++struct lock *bc;
++struct lock *ca;
++
++struct lock *turn_lock;
++struct lock *print_lock;
++struct lock *mutex_lock; 
++
++int counter; 
++
++int car_counter_a; 
++int car_counter_b; 
++int car_counter_c; 
++
++int truck_counter_b; 
++int truck_counter_a;
++int truck_counter_c; 
++
++int counter_a; 
++int counter_b; 
++int counter_c; 
++
++
+ /*
+  * Number of vehicles created.
+  */
+ 
++
+ #define NVEHICLES 20
+ 
+ 
+@@ -66,11 +100,43 @@ turnleft(unsigned long vehicledirection,
+ {
+ 	/*
+ 	 * Avoid unused variable warnings.
+-	 */
+-
+-	(void) vehicledirection;
+-	(void) vehiclenumber;
+-	(void) vehicletype;
++	*/
++
++  //locks the critical section of the turn until it finishes to avoid 
++  //the left turn deadlock.
++	lock_acquire(turn_lock);
++	kprintf("%s #%lu making a LEFT from %s\n", vtypes[vehicletype], vehiclenumber, vdirections[vehicledirection]);
++    
++	if(vehicledirection == A){
++  	lock_acquire(ab);
++    kprintf("%s #%lu now in section AB\n", vtypes[vehicletype], vehiclenumber);
++    lock_acquire(bc);
++    lock_release(turn_lock);
++    lock_release(ab);
++    kprintf("%s #%lu now in section BC\n", vtypes[vehicletype], vehiclenumber);
++    kprintf("%s #%lu out of intersection, now in Route C\n", vtypes[vehicletype], vehiclenumber);
++    lock_release(bc);     
++  }
++	else if(vehicledirection == B){
++  	lock_acquire(bc);
++    kprintf("%s #%lu now in section BC\n", vtypes[vehicletype], vehiclenumber);
++    lock_acquire(ca);
++    lock_release(turn_lock);
++    lock_release(bc); 
++    kprintf("%s #%lu now in section CA\n", vtypes[vehicletype], vehiclenumber);
++    kprintf("%s #%lu out of intersection, now in Route A\n", vtypes[vehicletype], vehiclenumber);
++    lock_release(ca); 	       
++	}
++  else if(vehicledirection == C){
++  	lock_acquire(ca);
++    kprintf("%s #%lu now in section CA\n", vtypes[vehicletype], vehiclenumber);
++    lock_acquire(ab);
++    lock_release(turn_lock);
++    lock_release(ca);
++    kprintf("%s #%lu now in section AB\n", vtypes[vehicletype], vehiclenumber);
++    kprintf("%s #%lu out of intersection, now in Route B\n", vtypes[vehicletype], vehiclenumber);
++    lock_release(ab);
++	}
+ }
+ 
+ 
+@@ -100,10 +166,31 @@ turnright(unsigned long vehicledirection,
+ 	/*
+ 	 * Avoid unused variable warnings.
+ 	 */
+-
+-	(void) vehicledirection;
+-	(void) vehiclenumber;
+-	(void) vehicletype;
++  //avoiding right turn conflict with left
++	lock_acquire(turn_lock);
++  kprintf("%s #%lu making a RIGHT from %s\n", vtypes[vehicletype], vehiclenumber, vdirections[vehicledirection]);
++
++	if(vehicledirection == A){
++  	lock_acquire(ab);
++    kprintf("%s #%lu now in section AB\n", vtypes[vehicletype], vehiclenumber);
++    lock_release(turn_lock);
++    kprintf("%s #%lu out of intersection, now in Route B\n", vtypes[vehicletype], vehiclenumber);
++    lock_release(ab);
++	}
++  else if(vehicledirection == B){
++  	lock_acquire(bc); 
++    kprintf("%s #%lu now in section BC\n", vtypes[vehicletype], vehiclenumber); 
++    lock_release(turn_lock);
++    kprintf("%s #%lu out of intersection, now in Route C\n", vtypes[vehicletype], vehiclenumber);
++    lock_release(bc);        
++	}
++  else if(vehicledirection == C){
++    lock_acquire(ca);
++    kprintf("%s #%lu now in section CA\n", vtypes[vehicletype], vehiclenumber);
++ 	  lock_release(turn_lock);
++    kprintf("%s #%lu out of intersection, now in Route A\n", vtypes[vehicletype], vehiclenumber);
++    lock_release(ca);      
++  }
+ }
+ 
+ 
+@@ -133,7 +220,8 @@ approachintersection(void * unusedpointer,
+ 		unsigned long vehiclenumber)
+ {
+ 	int vehicledirection, turndirection, vehicletype;
+-
++	int spl; 
++	
+ 	/*
+ 	 * Avoid unused variable and function warnings.
+ 	 */
+@@ -144,12 +232,170 @@ approachintersection(void * unusedpointer,
+ 	(void) turnright;
+ 
+ 	/*
+-	 * vehicledirection is set randomly.
++	 * vehicledirections are below.
++	 * 0 = Approaching from A
++	 * 1 = Approaching from B
++	 * 2 = Approaching from C
+ 	 */
+-
+ 	vehicledirection = random() % 3;
++
++	/**
++	 * TurnDirection: 
++	 * 0 = turnleft 
++	 * 1 = turnright 
++	 */
+ 	turndirection = random() % 2;
+-	vehicletype = random() % 2;
++	
++  /*
++   * 0 = CAR;
++   * 1 = TRUCK;
++   */
++  vehicletype = random() % 2;
++	
++  //lock to safely print the approaching car
++  //turning off interrupts may affect this
++  lock_acquire(print_lock);
++  kprintf("%s #%lu approaching the intersection from %s\n", vtypes[vehicletype], vehiclenumber, vdirections[vehicledirection]);
++  lock_release(print_lock);
++
++	//Car coming from route a. 
++	if(vehicledirection == A){ 
++		lock_acquire(mutex_lock); 
++    counter_a++;
++    lock_release(mutex_lock); 
++	
++		//Check for the truck and increment truck counter in route a. 
++		//If there is no car in route a then truck will cross. 
++		//Otherwise truck will wait for all cars to cross. 
++		if(vehicletype == TRUCK){
++    	lock_acquire(mutex_lock);
++      truck_counter_a++;
++      lock_release(mutex_lock);
++      if(car_counter_a > 0){ 
++				spl = splhigh();
++      	thread_sleep((void*)&truck_counter_a);
++        splx(spl);
++			}
++		}
++  	
++		if(turndirection == LEFT){
++    	turnleft(vehicledirection, vehiclenumber, vehicletype);
++  	}	
++  	else if(turndirection == RIGHT){
++      turnright(vehicledirection, vehiclenumber, vehicletype);
++  	}
++		
++		//Check for car and increment car counter in route a. 
++		//When the last car cross we wake all truck threads. 
++		if(vehicletype == CAR){
++			lock_acquire(mutex_lock); 
++			car_counter_a++; 
++			lock_release(mutex_lock);
++			if(truck_counter_a == counter_a - car_counter_a){
++      	lock_acquire(print_lock);
++        lock_release(print_lock);
++        spl = splhigh();
++				thread_wakeup((void*)&truck_counter_a);
++				splx(spl); 
++			}
++		}		
++	}
++	else if(vehicledirection == B){ //Car coming from B 
++
++		lock_acquire(mutex_lock); 
++    counter_b++;
++    lock_release(mutex_lock); 
++
++	  //Check for the truck and increment truck counter in route b. 
++		//If there is no car in route b then truck will cross. 
++		//Otherwise truck will wait for all cars to cross.  
++		if(vehicletype == TRUCK){
++    	lock_acquire(mutex_lock);
++      truck_counter_b++;
++      lock_release(mutex_lock);
++      if(car_counter_b > 0){      
++			  spl = splhigh();
++        thread_sleep((void*)&truck_counter_b);
++				splx(spl);
++			}
++		}
++
++		if(turndirection == LEFT){
++    	turnleft(vehicledirection, vehiclenumber, vehicletype);
++    }	
++    else if(turndirection == RIGHT){
++    	turnright(vehicledirection, vehiclenumber, vehicletype);
++    }
++    
++    //Check for car and increment car counter for route b. 
++    //When the last car cross we wake all truck threads. 
++		if(vehicletype == CAR){
++    	lock_acquire(mutex_lock); 
++      car_counter_b++; 
++      lock_release(mutex_lock); 
++      if(truck_counter_b == counter_b - car_counter_b){
++      	lock_acquire(print_lock);
++       	lock_release(print_lock);
++        spl = splhigh();
++       	thread_wakeup((void*)&truck_counter_b);
++      	splx(spl); 
++			}
++  	}
++	}
++	else if(vehicledirection == C){ //Car coming from C 
++  
++		lock_acquire(mutex_lock); 
++    counter_c++;
++    lock_release(mutex_lock); 
++	
++	  //Check for the truck and increment truck counter in route c. 
++		//If there is no car in route c then truck will cross. 
++		//Otherwise truck will wait for all cars to cross. 
++		if(vehicletype == TRUCK){
++    	lock_acquire(mutex_lock);
++      truck_counter_c++;
++      lock_release(mutex_lock);
++      if(car_counter_c > 0){
++      	spl = splhigh();
++        thread_sleep((void*)&truck_counter_c);
++			  splx(spl);
++			}
++		}  
++    
++		if(turndirection == LEFT){
++    	turnleft(vehicledirection, vehiclenumber, vehicletype);
++    }	
++    else if(turndirection == RIGHT){
++    	turnright(vehicledirection, vehiclenumber, vehicletype);
++   	}
++    
++    //Check for cars and increment car counter in route c. 
++    //When the last car cross we wake all truck threads. 
++    if(vehicletype == CAR){
++    	lock_acquire(mutex_lock); 
++      car_counter_c++; 
++      lock_release(mutex_lock);
++      if(truck_counter_c == counter_c - car_counter_c){
++      	lock_acquire(print_lock);
++        lock_release(print_lock);         
++        spl = splhigh();
++        thread_wakeup((void*)&truck_counter_c);
++        splx(spl); 
++      }
++    }
++	}
++	
++	//number of vehicles in route a,b and c. 
++	lock_acquire(mutex_lock); 
++	counter++; 
++	lock_release(mutex_lock); 
++
++  //When all vehicles left this will wakeup the main thread. 
++	spl = splhigh(); 
++	if(counter == NVEHICLES){
++		thread_wakeup((void*)&counter); 
++	}
++	splx(spl); 
+ }
+ 
+ 
+@@ -172,8 +418,29 @@ int
+ createvehicles(int nargs,
+ 		char ** args)
+ {
+-	int index, error;
+-
++	int index, error, spl;
++  
++	//Initialize all the locks and int variables. 
++  ab = lock_create("ab");
++  bc = lock_create("bc");
++  ca = lock_create("ca");
++  turn_lock = lock_create("turn_lock");
++  print_lock = lock_create("print_lock");
++	mutex_lock = lock_create("mutex_lock"); 
++
++	counter = 0; 
++	car_counter_a = 0; 
++	truck_counter_a = 0; 
++ 
++	car_counter_b = 0; 
++	truck_counter_b = 0;
++ 
++	car_counter_c = 0; 
++	truck_counter_c = 0;
++
++	counter_a = 0; 
++	counter_b = 0;
++	counter_c = 0; 
+ 	/*
+ 	 * Avoid unused variable warnings.
+ 	 */
+@@ -199,12 +466,25 @@ createvehicles(int nargs,
+ 		 */
+ 
+ 		if (error) {
+-
+ 			panic("approachintersection: thread_fork failed: %s\n",
+ 					strerror(error)
+ 				 );
+ 		}
+ 	}
++	
++	spl = splhigh(); 
++	if(counter < NVEHICLES){
++		//wait until all threads leave 
++		thread_sleep((void*)&counter); 
++	}
++	splx(spl);
++
++  lock_destroy(ab);
++  lock_destroy(bc);
++  lock_destroy(ca);
++  lock_destroy(turn_lock);
++  lock_destroy(print_lock);
++  lock_destroy(mutex_lock);
+ 
+ 	return 0;
+ }
+diff --git a/kern/include/synch.h b/kern/include/synch.h
+index 3583e78..fb84117 100644
+--- a/kern/include/synch.h
++++ b/kern/include/synch.h
+@@ -50,6 +50,8 @@ void              sem_destroy(struct semaphore *);
+ 
+ struct lock {
+ 	char *name;
++	volatile int isOwn;
++	struct thread *owner; 
+ 	// add what you need here
+ 	// (don't forget to mark things volatile as needed)
+ };
+diff --git a/kern/thread/synch.c b/kern/thread/synch.c
+index 4c33942..c4a93df 100644
+--- a/kern/thread/synch.c
++++ b/kern/thread/synch.c
+@@ -13,6 +13,7 @@
+ ////////////////////////////////////////////////////////////
+ //
+ // Semaphore.
++ 
+ 
+ struct semaphore *
+ sem_create(const char *namearg, int initial_count)
+@@ -115,7 +116,9 @@ lock_create(const char *name)
+ 	}
+ 	
+ 	// add stuff here as needed
+-	
++	lock->isOwn=0; 
++	lock->owner=NULL; 
++
+ 	return lock;
+ }
+ 
+@@ -134,26 +137,55 @@ void
+ lock_acquire(struct lock *lock)
+ {
+ 	// Write this
++	//This checks for valid lock. 
++	assert(lock != NULL);
+ 
+-	(void)lock;  // suppress warning until code gets written
++	int spl; 
++	spl = splhigh(); //Disable interrupts.  
++
++	// If the thread doesn't own the lock, we wait. 
++	while(lock->isOwn == 1){ 
++		// put the current thread to sleep 
++		thread_sleep(lock); 
++	}
++
++	lock->owner = curthread; 
++	lock->isOwn = 1; 
++	splx(spl);  // Re-enable interrupts 	
++	//(void)lock;  // suppress warning until code gets written
+ }
+ 
+ void
+ lock_release(struct lock *lock)
+ {
+-	// Write this
++	// make sure that lock is valid. 
++	assert(lock != NULL); 
++	int spl; 
++	spl = splhigh(); 
++	
++	//ownes thread will removed. 
++	if(lock->owner == curthread){
++		lock->isOwn = 0; 
++		lock->owner = NULL; 
++		thread_wakeup(lock);  
++	}
+ 
+-	(void)lock;  // suppress warning until code gets written
++	splx(spl); 
++	//(void)lock;  // suppress warning until code gets written
+ }
+ 
+ int
+ lock_do_i_hold(struct lock *lock)
+ {
+ 	// Write this
+-
+-	(void)lock;  // suppress warning until code gets written
+-
+-	return 1;    // dummy until code gets written
++	assert(lock != NULL); 
++	
++	//If the owner is current thread it will return true. 
++	if (lock->owner == curthread){
++		return 1; 
++	}
++	return 0; 
++	
+ }
+ 
+ ////////////////////////////////////////////////////////////
+diff --git a/kern/thread/thread.c b/kern/thread/thread.c
+index 4eb95d3..32eb268 100644
+--- a/kern/thread/thread.c
++++ b/kern/thread/thread.c
+@@ -88,7 +88,7 @@ thread_destroy(struct thread *thread)
+ 		kfree(thread->t_stack);
+ 	}
+ 	
+-	DEBUG(DB_THREADS, "Thread "%s" destroyed\n", thread->t_name);
++	DEBUG(DB_THREADS, "Thread %s destroyed\n", thread->t_name);
+ 
+ 	kfree(thread->t_name);
+ 	kfree(thread);
+@@ -344,7 +344,7 @@ mi_switch(threadstate_t nextstate)
+ 	/* Interrupts should already be off. */
+ 	assert(curspl>0);
+ 	
+-    DEBUG(DB_THREADS, "Thread state: %s\n", threadstate_t);
++    DEBUG(DB_THREADS, "Thread state: %d\n", nextstate);
+     
+ 	if (curthread != NULL && curthread->t_stack != NULL) {
+ 		/*
+@@ -501,7 +501,7 @@ thread_sleep(const void *addr)
+ {
+ 	// may not sleep in an interrupt handler
+ 	assert(in_interrupt==0);
+-	DEBUG(DB_THREADS, "Thread to sleep: %s\n", t_name);
++	DEBUG(DB_THREADS, "Thread to sleep: %s\n", curthread->t_name);
+ 	curthread->t_sleepaddr = addr;
+ 	mi_switch(S_SLEEP);
+ 	curthread->t_sleepaddr = NULL;
+diff --git a/lib/hostcompat/libhostcompat.ha b/lib/hostcompat/libhostcompat.ha
+index 7af7f80..bbc149c 100644
+Binary files a/lib/hostcompat/libhostcompat.ha and b/lib/hostcompat/libhostcompat.ha differ
+diff --git a/lib/libc/libc.a b/lib/libc/libc.a
+index 019d7e2..37d9bcd 100644
+Binary files a/lib/libc/libc.a and b/lib/libc/libc.a differ
